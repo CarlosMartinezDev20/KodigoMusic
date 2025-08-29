@@ -4,6 +4,8 @@ import Sidebar from '../components/Sidebar.jsx'
 import Row from '../components/Row.jsx'
 
 const WOS_ITUNES_ID = 1428259384
+// En prod (Vercel) usamos el proxy /api/itunes; en dev llamamos directo:
+const ITUNES = import.meta.env.PROD ? '/api/itunes' : 'https://itunes.apple.com'
 
 export default function Home(){
   const { user, logout } = useAuth()
@@ -15,22 +17,50 @@ export default function Home(){
   const [duration, setDuration] = useState(0)
   const [volume, setVolume] = useState(0.9)
   const [muted, setMuted] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
   const audioRef = useRef(null)
+
+  const secure = (u) => (u ? u.replace(/^http:/, 'https:') : '')
+  const format = (s) => {
+    if (!isFinite(s)) return '0:00'
+    const m = Math.floor(s / 60); const ss = Math.floor(s % 60).toString().padStart(2,'0')
+    return `${m}:${ss}`
+  }
 
   useEffect(()=>{
     const fetchWos = async () => {
+      setLoading(true); setError('')
       try {
-        const url = `https://itunes.apple.com/lookup?id=${WOS_ITUNES_ID}&entity=song&limit=200`
-        const res = await fetch(url)
-        const data = await res.json()
-        const list = (data.results || []).filter(r => r.wrapperType === 'track' || r.kind === 'song')
+        const endpoints = [
+          `${ITUNES}/lookup?id=${WOS_ITUNES_ID}&entity=song&limit=200&country=AR`,
+          `${ITUNES}/lookup?id=${WOS_ITUNES_ID}&entity=song&limit=200&country=US`,
+          `${ITUNES}/search?term=wos&entity=song&limit=200&country=AR`,
+          `${ITUNES}/search?term=wos&entity=song&limit=200&country=US`,
+        ]
+
+        let results = []
+        for (const url of endpoints) {
+          const r = await fetch(url)
+          if (!r.ok) continue
+          const data = await r.json()
+          const arr = Array.isArray(data.results) ? data.results : []
+          if (arr.length) { results = arr; break }
+        }
+
+        const list = (results || []).filter(r => r.wrapperType === 'track' || r.kind === 'song')
         const seen = new Set()
         const unique = list.filter(t => (seen.has(t.trackId) ? false : (seen.add(t.trackId), true)))
         const onlyWos = unique.filter(t => String(t.artistName || '').toLowerCase().includes('wos'))
+
         setAllTracks(onlyWos)
         setTracks(onlyWos)
       } catch(e){
         console.error(e)
+        setError('No se pudieron cargar las canciones. Intenta recargar.')
+        setAllTracks([]); setTracks([])
+      } finally {
+        setLoading(false)
       }
     }
     fetchWos()
@@ -44,7 +74,7 @@ export default function Home(){
   const albumArts = useMemo(()=>{
     const m = {}
     for(const t of allTracks){
-      if(!m[t.collectionName]) m[t.collectionName] = t.artworkUrl100.replace('100x100','200x200')
+      if(!m[t.collectionName]) m[t.collectionName] = secure(t.artworkUrl100).replace('100x100','200x200')
     }
     return m
   }, [allTracks])
@@ -90,16 +120,10 @@ export default function Home(){
     }
   }, [volume])
 
-  const format = (s) => {
-    if (!isFinite(s)) return '0:00'
-    const m = Math.floor(s / 60); const ss = Math.floor(s % 60).toString().padStart(2,'0')
-    return `${m}:${ss}`
-  }
-
   const playTrack = (t) => {
     const idx = allTracks.findIndex(x => x.trackId === t.trackId)
-    if (idx === -1) return
-    audioRef.current.src = t.previewUrl
+    if (idx === -1 || !t?.previewUrl) return
+    audioRef.current.src = secure(t.previewUrl)
     audioRef.current.play()
     setPlayingIndex(idx)
   }
@@ -108,7 +132,7 @@ export default function Home(){
     if (idx < 0 || idx >= allTracks.length) return
     const t = allTracks[idx]
     if (!t?.previewUrl) return
-    audioRef.current.src = t.previewUrl
+    audioRef.current.src = secure(t.previewUrl)
     audioRef.current.play()
     setPlayingIndex(idx)
   }
@@ -132,17 +156,18 @@ export default function Home(){
 
   const onSeek = (e) => {
     const v = Number(e.target.value)
-    audioRef.current.currentTime = v
+    if (!Number.isFinite(v)) return
+    if (audioRef.current) audioRef.current.currentTime = v
     setCurrentTime(v)
   }
   const onVolume = (e) => {
     const v = Number(e.target.value)
-    audioRef.current.volume = v
+    if (audioRef.current) audioRef.current.volume = v
     setVolume(v)
     if (v>0 && muted) setMuted(false)
   }
   const toggleMute = () => {
-    audioRef.current.muted = !muted
+    if (audioRef.current) audioRef.current.muted = !muted
     setMuted(!muted)
   }
 
@@ -204,11 +229,16 @@ export default function Home(){
               <div className="row-head">
                 <h3>Resultados</h3>
               </div>
+              {loading && <p className="muted">Cargando…</p>}
+              {!loading && error && <p className="error">{error}</p>}
+              {!loading && !error && tracks.length === 0 && (
+                <p className="muted">No se encontraron canciones de WOS.</p>
+              )}
               <div className="grid">
                 {tracks.map((t) => (
                   <div className="card track fancy" key={t.trackId} title={t.trackName}>
                     <div className="cover-wrap">
-                      <img src={t.artworkUrl100.replace('100x100', '300x300')} alt={t.trackName} />
+                      <img src={secure(t.artworkUrl100).replace('100x100', '300x300')} alt={t.trackName} />
                     </div>
                     <div className="track-info">
                       <h3>{t.trackName}</h3>
@@ -233,7 +263,7 @@ export default function Home(){
         <aside className="right-panel glass">
           {playing ? (
             <div className="now-playing card">
-              <img src={playing.artworkUrl100.replace('100x100','300x300')} alt="" />
+              <img src={secure(playing.artworkUrl100).replace('100x100','300x300')} alt="" />
               <div className="np-info">
                 <strong className="ellipsis">{playing.trackName}</strong>
                 <span className="muted ellipsis">{playing.collectionName}</span>
@@ -260,7 +290,7 @@ export default function Home(){
         {playing && (
           <div className="player-inner full glass">
             <div className="left">
-              <img src={playing.artworkUrl100} alt="" />
+              <img src={secure(playing.artworkUrl100)} alt="" />
               <div className="info">
                 <strong className="ellipsis">{playing.trackName}</strong>
                 <span className="muted ellipsis">{playing.collectionName}</span>
@@ -284,7 +314,7 @@ export default function Home(){
               <button className="btn subtle" onClick={toggleMute} title="Mute/Unmute">
                 {muted || volume === 0 ? '🔇' : '🔊'}
               </button>
-              <input className="vol range" type="range" min="0" max="1" step="0.01" value={muted?0:volume} onChange={onVolume} />
+              <input className="vol range" type="range" min="0" max="1" step="0.01" value={muted?0:volume} />
             </div>
           </div>
         )}
